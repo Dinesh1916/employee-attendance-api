@@ -17,9 +17,7 @@ from pymongo.collection import Collection
 
 load_dotenv()
 
-# --------------------------------------------------------------------------- #
-# DB Setup
-# --------------------------------------------------------------------------- #
+
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB  = os.getenv("MONGO_DB", "attendance_db")
 
@@ -45,41 +43,35 @@ def create_indexes():
     """Create all required indexes idempotently at startup."""
     db = get_db()
 
-    # employees: unique on emp_code (enforces dedup at DB level for concurrent creates)
     db.employees.create_index([("emp_code", ASCENDING)], unique=True, name="idx_emp_code_unique")
     db.employees.create_index([("department", ASCENDING)], name="idx_emp_dept")
     db.employees.create_index([("joined_on", ASCENDING)], name="idx_emp_joined_on")
 
-    # attendance_logs: unique compound key is our main access pattern
     db.attendance_logs.create_index(
         [("emp_code", ASCENDING), ("date", ASCENDING)],
         unique=True,
         name="idx_log_emp_date_unique",
     )
-    # Needed for sorting/filtering by date (list endpoint, trend)
+
     db.attendance_logs.create_index(
         [("date", DESCENDING), ("emp_code", ASCENDING)],
         name="idx_log_date_emp",
     )
-    # Analytics aggregations filter by date range + status
+    
     db.attendance_logs.create_index(
         [("date", ASCENDING), ("status", ASCENDING)],
         name="idx_log_date_status",
     )
 
 
-# --------------------------------------------------------------------------- #
-# Constants
-# --------------------------------------------------------------------------- #
+
 PRESENCE_STATUSES = {"PRESENT", "WFH", "ON_DUTY"}
 ALL_STATUSES      = {"PRESENT", "WFH", "ON_DUTY", "ABSENT", "LEAVE"}
-EPOCH_MIN = 100_000_000_000   # milliseconds: ~1973 (guards against seconds)
+EPOCH_MIN = 100_000_000_000   
 EPOCH_MAX = 4_102_444_800_000
 
 
-# --------------------------------------------------------------------------- #
-# Business Rule Helpers (R1-R5)
-# --------------------------------------------------------------------------- #
+
 def millis_to_dt(ms: int) -> datetime:
     """Convert epoch-milliseconds to a timezone-aware UTC datetime, truncated to whole seconds."""
     dt = datetime.fromtimestamp(ms // 1000, tz=timezone.utc)
@@ -106,14 +98,10 @@ def attendance_date(punch_in_utc: datetime, shift_end: str) -> str:
     whose IST time is strictly earlier than shift_end belongs to the PREVIOUS day's shift.
     """
     punch_ist = to_ist(punch_in_utc)
-    # Determine if this is an overnight shift possibility:
-    # We compare the IST time of punch_in to shift_end time on the same IST day.
-    # If shift_end <= shift_start (the shift spans midnight), and punch_ist.time < shift_end,
-    # then the attendance date is the previous IST calendar day.
+
     eh, em = map(int, shift_end.split(":"))
     shift_end_time = punch_ist.replace(hour=eh, minute=em, second=0, microsecond=0)
-    # We don't have shift_start here; that logic is handled before calling this.
-    # The caller must pass a sentinel to indicate overnight.
+    
     return punch_ist.date().isoformat()
 
 
@@ -172,18 +160,7 @@ def compute_overtime_minutes(punch_out: datetime, shift_end: str, att_date: str)
     att = date.fromisoformat(att_date)
     end_ist = datetime(att.year, att.month, att.day, h, m, 0, tzinfo=IST)
 
-    # If shift_end time is on a later calendar day (overnight), add a day
-    # We detect this: if punch_ist is clearly before shift_end on att_date but we know
-    # it's an overnight shift, we must add a day.
-    # Simpler heuristic: if end_ist is before punch_in (start of same day), push end to next day.
-    # But we don't have punch_in here. Instead check: if end_ist < 12:00 and punch_ist > 12:00 -> next day
-    # The safest approach: if punch_ist time < shift_end time on att_date, the shift_end is next day
-    # (only matters for overnight). We'll detect by checking if punch_ist is within 24h of att_date noon.
-
-    # Check if the shift is overnight by comparing shift_end to 12:00 noon heuristic:
-    # For an overnight shift end like 06:00, the shift end is on the next calendar day.
-    # The punch_out for overnight should be on att_date+1.
-    # If the computed end_ist is more than 12h before punch_ist, add a day:
+    
     if (punch_ist - end_ist).total_seconds() > 12 * 3600:
         end_ist += timedelta(days=1)
 
@@ -205,9 +182,7 @@ def round_half_up(value: float, decimals: int) -> float:
     return math.floor(value * factor + 0.5) / factor
 
 
-# --------------------------------------------------------------------------- #
-# Serialization helpers
-# --------------------------------------------------------------------------- #
+
 PRESENCE_FIELDS = {"punch_in", "punch_out"}
 
 
@@ -262,9 +237,7 @@ def serialize_employee(doc: dict) -> dict:
     }
 
 
-# --------------------------------------------------------------------------- #
-# Pydantic Models
-# --------------------------------------------------------------------------- #
+
 class EmployeeCreate(BaseModel):
     emp_code:    str
     name:        str
@@ -382,9 +355,7 @@ class RegularizeRequest(BaseModel):
         return v
 
 
-# --------------------------------------------------------------------------- #
-# System
-# --------------------------------------------------------------------------- #
+
 @app.get("/health")
 def health():
     db = get_db()
@@ -395,9 +366,7 @@ def health():
         raise HTTPException(503, detail="MongoDB unavailable")
 
 
-# --------------------------------------------------------------------------- #
-# Employees
-# --------------------------------------------------------------------------- #
+
 @app.post("/employees", status_code=201)
 def create_employee(body: EmployeeCreate):
     db = get_db()
@@ -437,9 +406,7 @@ def list_employees(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Attendance – Punch In
-# --------------------------------------------------------------------------- #
+
 @app.post("/attendance/punch-in", status_code=201)
 def punch_in(body: PunchInRequest):
     db = get_db()
@@ -476,9 +443,7 @@ def punch_in(body: PunchInRequest):
     return serialize_log(doc)
 
 
-# --------------------------------------------------------------------------- #
-# Attendance – Punch Out
-# --------------------------------------------------------------------------- #
+
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutRequest):
     db = get_db()
@@ -491,7 +456,7 @@ def punch_out(body: PunchOutRequest):
     else:
         ts = datetime.now(tz=timezone.utc).replace(microsecond=0)
 
-    # Find the most recent record where punch_in <= punched_at and punch_out is null
+    
     record = db.attendance_logs.find_one(
         {
             "emp_code":  body.emp_code,
@@ -507,7 +472,7 @@ def punch_out(body: PunchOutRequest):
     if punch_in_dt.tzinfo is None:
         punch_in_dt = punch_in_dt.replace(tzinfo=timezone.utc)
 
-    # Validate: punch_out must be after punch_in and within 24 hours
+    
     diff_secs = (ts - punch_in_dt).total_seconds()
     if diff_secs <= 0:
         raise HTTPException(422, detail="punched_at must be after punch_in")
@@ -521,7 +486,7 @@ def punch_out(body: PunchOutRequest):
     result = db.attendance_logs.find_one_and_update(
         {
             "_id":       record["_id"],
-            "punch_out": None,          # guard against concurrent punch-outs
+            "punch_out": None,          
         },
         {
             "$set": {
@@ -539,9 +504,7 @@ def punch_out(body: PunchOutRequest):
     return serialize_log(result)
 
 
-# --------------------------------------------------------------------------- #
-# Attendance – List
-# --------------------------------------------------------------------------- #
+
 @app.get("/attendance")
 def list_attendance(
     emp_code:  Optional[str] = None,
@@ -586,9 +549,7 @@ def list_attendance(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Attendance – Regularize (PATCH)
-# --------------------------------------------------------------------------- #
+
 @app.patch("/attendance/{emp_code}/{date}")
 def regularize_attendance(
     emp_code: str,
@@ -598,7 +559,7 @@ def regularize_attendance(
     date_str = date
     db = get_db()
 
-    # Validate date format
+    
     try:
         date.fromisoformat(date_str)
     except ValueError:
@@ -612,20 +573,20 @@ def regularize_attendance(
     if not record:
         raise HTTPException(404, detail="No attendance record found for this employee and date")
 
-    # Validate: ABSENT/LEAVE with punch times
+    
     new_status = body.status or record["status"]
     if new_status in {"ABSENT", "LEAVE"}:
         if body.punch_in is not None or body.punch_out is not None:
             raise HTTPException(422, detail="ABSENT/LEAVE status cannot have punch times")
 
-    # Presence status requires a punch_in
+    
     if new_status in PRESENCE_STATUSES:
         existing_pi = record.get("punch_in")
         incoming_pi = body.punch_in
         if existing_pi is None and incoming_pi is None:
             raise HTTPException(422, detail="Presence status requires a punch_in")
 
-    # Determine final punch_in and punch_out (as aware datetimes)
+    
     def _to_aware(dt_val):
         if dt_val is None:
             return None
@@ -639,18 +600,18 @@ def regularize_attendance(
     new_pi  = millis_to_dt(body.punch_in)  if body.punch_in  is not None else old_pi
     new_po  = millis_to_dt(body.punch_out) if body.punch_out is not None else old_po
 
-    # ABSENT/LEAVE clears punch times
+    
     if new_status in {"ABSENT", "LEAVE"}:
         new_pi = None
         new_po = None
 
-    # Validate punch_in stays on the record's attendance date (R1)
+    
     if new_pi is not None:
         pi_date = attendance_date_full(new_pi, emp["shift_start"], emp["shift_end"])
         if pi_date != date_str:
             raise HTTPException(422, detail="punch_in must remain on the record's attendance date")
 
-    # Validate punch_out constraints
+    
     if new_po is not None and new_pi is not None:
         diff_secs = (new_po - new_pi).total_seconds()
         if diff_secs <= 0:
@@ -658,7 +619,7 @@ def regularize_attendance(
         if diff_secs > 86400:
             raise HTTPException(422, detail="punch_out must be within 24 hours of punch_in")
 
-    # Recompute derived fields
+    
     if new_status in {"ABSENT", "LEAVE"}:
         new_late = 0
         new_wh   = None
@@ -675,7 +636,7 @@ def regularize_attendance(
             new_ot = record.get("overtime_minutes", 0)
             new_hd = record.get("half_day", False)
 
-    # Build changes dict: only fields that actually changed
+    
     def _norm_dt(v):
         """Normalise stored datetime for comparison (UTC aware, whole seconds)."""
         if v is None:
@@ -724,7 +685,7 @@ def regularize_attendance(
         "changes": changes,
     }
 
-    # Atomic update with optimistic concurrency: compare history length to detect concurrent edit
+    
     current_history_len = len(record.get("history") or [])
     updated = db.attendance_logs.find_one_and_update(
         {
@@ -751,9 +712,7 @@ def regularize_attendance(
     return serialize_log(updated)
 
 
-# --------------------------------------------------------------------------- #
-# Analytics – Employee Monthly Summary
-# --------------------------------------------------------------------------- #
+
 def _month_range(month: str):
     """Return (YYYY-MM-DD start, YYYY-MM-DD end) for a YYYY-MM month string."""
     import calendar
@@ -795,13 +754,13 @@ def employee_monthly(
         {
             "$group": {
                 "_id": None,
-                # present_days: PRESENT/WFH/ON_DUTY on Mon-Fri; half_day = 0.5
+
                 "present_days": {
                     "$sum": {
                         "$cond": [
                             {"$and": [
                                 {"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]},
-                                # isoDayOfWeek: 1=Mon … 7=Sun; working = 1-5
+                                
                                 {"$lte": [{"$isoDayOfWeek": {"$dateFromString": {"dateString": "$date"}}}, 5]},
                             ]},
                             {"$cond": [{"$eq": ["$half_day", True]}, 0.5, 1.0]},
@@ -847,9 +806,7 @@ def employee_monthly(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Analytics – Department Summary
-# --------------------------------------------------------------------------- #
+
 @app.get("/analytics/departments/summary")
 def department_summary(
     month:      str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
@@ -863,7 +820,7 @@ def department_summary(
         emp_match["department"] = department
 
     pipeline = [
-        # Stage 1: all employees whose joined_on <= month end
+        
         {"$match": emp_match},
         {
             "$group": {
@@ -873,7 +830,7 @@ def department_summary(
                 "joined_ons":    {"$push": "$joined_on"},
             }
         },
-        # Stage 2: lookup attendance logs for those departments
+        
         {
             "$lookup": {
                 "from": "attendance_logs",
@@ -955,9 +912,7 @@ def department_summary(
     return {"month": month, "items": items}
 
 
-# --------------------------------------------------------------------------- #
-# Analytics – Late Leaderboard
-# --------------------------------------------------------------------------- #
+
 @app.get("/analytics/leaderboard/late")
 def late_leaderboard(
     month:      str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
@@ -967,7 +922,7 @@ def late_leaderboard(
     db = get_db()
     m_start, m_end = _month_range(month)
 
-    # First join logs -> employees to filter by department and get name
+    
     pipeline: list[Any] = [
         {"$match": {"date": {"$gte": m_start, "$lte": m_end}, "late_minutes": {"$gt": 0}}},
         {
@@ -977,7 +932,7 @@ def late_leaderboard(
                 "late_count":         {"$sum": 1},
             }
         },
-        # Join to employees for name/department
+        
         {
             "$lookup": {
                 "from":         "employees",
@@ -986,7 +941,7 @@ def late_leaderboard(
                 "as":           "emp",
             }
         },
-        {"$unwind": "$emp"},  # drops logs with no employee (per spec)
+        {"$unwind": "$emp"},  
     ]
 
     if department:
@@ -994,7 +949,7 @@ def late_leaderboard(
 
     pipeline += [
         {"$sort": {"total_late_minutes": -1, "_id": 1}},
-        # Compute standard competition rank
+        
         {
             "$group": {
                 "_id": None,
@@ -1018,16 +973,16 @@ def late_leaderboard(
 
     raw = list(db.attendance_logs.aggregate(pipeline))
 
-    # Compute standard competition ranking in Python (ties share rank, next skips)
+    
     result_items = []
     rank = 1
     i    = 0
     while i < len(raw):
-        # Find all rows with same total_late_minutes
+        
         j = i
         while j < len(raw) and raw[j]["total_late_minutes"] == raw[i]["total_late_minutes"]:
             j += 1
-        # Assign rank to i..j-1
+        
         for k in range(i, j):
             if rank <= limit:
                 result_items.append({
@@ -1046,9 +1001,7 @@ def late_leaderboard(
     return {"month": month, "items": result_items}
 
 
-# --------------------------------------------------------------------------- #
-# Analytics – Department Daily Trend
-# --------------------------------------------------------------------------- #
+
 @app.get("/analytics/departments/{department}/trend")
 def department_trend(
     department: str,
@@ -1068,15 +1021,14 @@ def department_trend(
 
     db = get_db()
 
-    # Validate department exists
+    
     exists = db.employees.find_one({"department": department})
     if not exists:
         raise HTTPException(404, detail="Department not found")
 
-    # Use MongoDB $densify to gap-fill days from from_date to to_date.
-    # We aggregate attendance_logs joined with employees filtered by department.
+    
     pipeline: list[Any] = [
-        # Match logs in date range for the department's employees (via lookup)
+        
         {"$match": {"date": {"$gte": from_date, "$lte": to_date}}},
         {
             "$lookup": {
@@ -1088,7 +1040,7 @@ def department_trend(
         },
         {"$unwind": "$emp"},
         {"$match": {"emp.department": department}},
-        # Group by date
+        
         {
             "$group": {
                 "_id":          "$date",
@@ -1104,13 +1056,13 @@ def department_trend(
                 "late_count": {"$sum": {"$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]}},
             }
         },
-        # Convert date string to a real date for $densify
+        
         {
             "$addFields": {
                 "date_dt": {"$dateFromString": {"dateString": "$_id", "format": "%Y-%m-%d"}},
             }
         },
-        # Gap-fill: add a row for every calendar day in range
+        
         {
             "$densify": {
                 "field":  "date_dt",
@@ -1139,18 +1091,18 @@ def department_trend(
 
     raw_days = list(db.attendance_logs.aggregate(pipeline))
 
-    # Build headcount: for each day, count employees with joined_on <= that day
+    
     all_emps = list(db.employees.find({"department": department}, {"_id": 0, "emp_code": 1, "joined_on": 1}))
 
     def headcount_on(day_str: str) -> int:
         return sum(1 for e in all_emps if e["joined_on"] <= day_str)
 
-    # Index raw_days by date
+    
     raw_by_date = {r["_id"]: r for r in raw_days}
 
-    # Build output, computing moving_avg_7d over attendance_rate values in window
+    
     items = []
-    rate_window: list[float] = []   # non-null attendance_rate values in last 7 days (incl current)
+    rate_window: list[float] = []   
 
     cur = from_d
     while cur <= to_d:
@@ -1166,14 +1118,13 @@ def department_trend(
         else:
             rate = None
 
-        # moving_avg_7d: mean of non-null rates in current + up to 6 preceding rows
-        # Only rates within the requested range count
+        
         if rate is not None:
             rate_window.append(rate)
         if len(rate_window) > 7:
             rate_window.pop(0)
 
-        # moving avg only from non-null rates in window
+        
         non_null = [r for r in rate_window if r is not None]
         if non_null:
             ma = round_half_up(sum(non_null) / len(non_null), 4)
@@ -1194,9 +1145,7 @@ def department_trend(
     return {"department": department, "items": items}
 
 
-# --------------------------------------------------------------------------- #
-# Admin – MongoDB Explain
-# --------------------------------------------------------------------------- #
+
 @app.get("/admin/explain/{endpoint}")
 def explain_endpoint(
     endpoint:   str,

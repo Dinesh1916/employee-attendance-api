@@ -13,15 +13,11 @@ FastAPI + MongoDB implementation of the HROne engineering assignment.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Copy and edit .env (never committed)
 cp .env.example .env
-# Set MONGO_URI=mongodb://localhost:27017
-# Set MONGO_DB=attendance_db
 
-# (Optional) seed sample data
+
 python sample_seed.py
 
-# Start server
 uvicorn app.main:app --port 8000 --reload
 ```
 
